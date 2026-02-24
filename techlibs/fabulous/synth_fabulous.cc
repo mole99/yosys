@@ -48,10 +48,6 @@ struct SynthPass : public ScriptPass
 		log("        write the design to the specified BLIF file. writing of an output file\n");
 		log("        is omitted if this parameter is not specified.\n");
 		log("\n");
-		log("    -edif <file>\n");
-		log("        write the design to the specified EDIF file. writing of an output file\n");
-		log("        is omitted if this parameter is not specified.\n");
-		log("\n");
 		log("    -json <file>\n");
 		log("        write the design to the specified JSON file. writing of an output file\n");
 		log("        is omitted if this parameter is not specified.\n");
@@ -59,11 +55,8 @@ struct SynthPass : public ScriptPass
 		log("    -lut <k>\n");
 		log("        perform synthesis for a k-LUT architecture (default 4).\n");
 		log("\n");
-		log("    -vpr\n");
-		log("        perform synthesis for the FABulous VPR flow (using slightly different techmapping).\n");
-		log("\n");
-		log("    -plib <primitive_library.v>\n");
-		log("        use the specified Verilog file as a primitive library.\n");
+		log("    -ff <cell_type_pattern> <init_values>\n");
+		log("        convert FFs to cell types via dfflegalize (can be specified multiple times).\n");
 		log("\n");
 		log("    -extra-plib <primitive_library.v>\n");
 		log("        use the specified Verilog file for extra primitives (can be specified multiple\n");
@@ -73,8 +66,9 @@ struct SynthPass : public ScriptPass
 		log("        use the specified Verilog file for extra techmap rules (can be specified multiple\n");
 		log("        times).\n");
 		log("\n");
-		log("    -encfile <file>\n");
-		log("        passed to 'fsm_recode' via 'fsm'\n");
+		log("    -extra-mlibmap <memory_map.txt>\n");
+		log("        use the provided library convert memory into hardware supported memory (can be specified\n");
+		log("        multiple times).\n");
 		log("\n");
 		log("    -nofsm\n");
 		log("        do not run FSM optimization\n");
@@ -86,12 +80,9 @@ struct SynthPass : public ScriptPass
 		log("    -carry <none|ha>\n");
 		log("        carry mapping style (none, half-adders, ...) default=none\n");
 		log("\n");
-		log("    -noregfile\n");
-		log("        do not map register files\n");
-		log("\n");
-		log("    -iopad\n");
-		log("        enable automatic insertion of IO buffers (otherwise a wrapper\n");
-		log("        with manually inserted and constrained IO should be used.)\n");
+		log("    -noiopad\n");
+		log("        disable I/O buffer insertion (useful for hierarchical or \n");
+		log("        out-of-context flows).\n");
 		log("\n");
 		log("    -complex-dff\n");
 		log("        enable support for FFs with enable and synchronous SR (must also be\n");
@@ -122,23 +113,22 @@ struct SynthPass : public ScriptPass
 		log("\n");
 	}
 
-	string top_module, json_file, blif_file, plib, fsm_opts, memory_opts, carry_mode;
-	std::vector<string> extra_plib, extra_map;
+	string top_module, json_file, blif_file, fsm_opts, memory_opts, carry_mode;
+	std::vector<string> extra_plib, extra_map, extra_mlibmap;
+	std::vector<std::pair<string, string>> extra_ffs;
 
-	bool autotop, forvpr, noalumacc, nofsm, noshare, noregfile, iopad, complexdff, flatten;
+	bool autotop, noalumacc, nofsm, noshare, noiopad, complexdff, flatten;
 	int lut;
 
 	void clear_flags() override
 	{
 		top_module.clear();
-		plib.clear();
 		autotop = false;
 		lut = 4;
-		forvpr = false;
 		noalumacc = false;
 		nofsm = false;
 		noshare = false;
-		iopad = false;
+		noiopad = false;
 		complexdff = false;
 		carry_mode = "none";
 		flatten = true;
@@ -177,10 +167,6 @@ struct SynthPass : public ScriptPass
 				}
 				continue;
 			}
-			if (args[argidx] == "-vpr") {
-				forvpr = true;
-				continue;
-			}
 			if (args[argidx] == "-auto-top") {
 				autotop = true;
 				continue;
@@ -189,8 +175,10 @@ struct SynthPass : public ScriptPass
 				lut = atoi(args[++argidx].c_str());
 				continue;
 			}
-			if (args[argidx] == "-plib" && argidx+1 < args.size()) {
-				plib = args[++argidx];
+			if (args[argidx] == "-ff") {
+				string cell = args[++argidx];
+				string init = args[++argidx];
+				extra_ffs.push_back({cell, init});
 				continue;
 			}
 			if (args[argidx] == "-extra-plib" && argidx+1 < args.size()) {
@@ -199,6 +187,10 @@ struct SynthPass : public ScriptPass
 			}
 			if (args[argidx] == "-extra-map" && argidx+1 < args.size()) {
 				extra_map.push_back(args[++argidx]);
+				continue;
+			}
+			if (args[argidx] == "-extra-mlibmap" && argidx+1 < args.size()) {
+				extra_mlibmap.push_back(args[++argidx]);
 				continue;
 			}
 			if (args[argidx] == "-nofsm") {
@@ -221,12 +213,8 @@ struct SynthPass : public ScriptPass
 				memory_opts += " -no-rw-check";
 				continue;
 			}
-			if (args[argidx] == "-noregfile") {
-				noregfile = true;
-				continue;
-			}
-			if (args[argidx] == "-iopad") {
-				iopad = true;
+			if (args[argidx] == "-noiopad") {
+				noiopad = true;
 				continue;
 			}
 			if (args[argidx] == "-complex-dff") {
@@ -260,11 +248,6 @@ struct SynthPass : public ScriptPass
 
 	void script() override
 	{
-		if (plib.empty())
-			run(stringf("read_verilog %s -lib +/fabulous/prims.v", complexdff ? "-DCOMPLEX_DFF" : ""));
-		else
-			run("read_verilog -lib " + plib);
-
 		if (help_mode) {
 			run("read_verilog -lib <extra_plib.v>", "(for each -extra-plib)");
 		} else for (auto lib : extra_plib) {
@@ -286,7 +269,7 @@ struct SynthPass : public ScriptPass
 		if (check_label("flatten", "(unless -noflatten)"))
 		{
 			if (flatten) {
-				run("flatten");
+				run("flatten -noscopeinfo");
 				run("tribuf -logic");
 				run("deminout");
 			}
@@ -320,11 +303,11 @@ struct SynthPass : public ScriptPass
 			run("opt_clean");
 		}
 
-		if (check_label("map_ram", "(unless -noregfile)")) {
-			// RegFile extraction
-			if (!noregfile) {
-				run("memory_libmap -lib +/fabulous/ram_regfile.txt");
-				run("techmap -map +/fabulous/regfile_map.v");
+		if (check_label("map_memory")) {
+			if (help_mode) {
+				run("memory_libmap -lib <memory_map.txt>", "(for each -extra-mlibmap)");
+			} else for (auto lib : extra_mlibmap) {
+				run("memory_libmap -lib " + lib);
 			}
 		}
 
@@ -336,30 +319,41 @@ struct SynthPass : public ScriptPass
 
 		if (check_label("map_gates")) {
 			run("opt -full");
-			run(stringf("techmap -map +/techmap.v -map +/fabulous/arith_map.v -D ARITH_%s",
+			run(stringf("techmap -map +/techmap.v -map +/fabulous/arith_map.v -D ARITH_%s", // TODO
 				help_mode ? "<carry>" : carry_mode.c_str()));
 			run("opt -fast");
 		}
 
-		if (check_label("map_iopad", "(if -iopad)")) {
-			if (iopad || help_mode) {
-				run("opt -full");
-				run("iopadmap -bits -outpad $__FABULOUS_OBUF I:PAD -inpad $__FABULOUS_IBUF O:PAD "
-					"-toutpad IO_1_bidirectional_frame_config_pass ~T:I:PAD "
-					"-tinoutpad IO_1_bidirectional_frame_config_pass ~T:O:I:PAD A:top", "(skip if '-noiopad')");
-				run("techmap -map +/fabulous/io_map.v");
-			}
+		if (check_label("map_iopad", "(skip if -noiopad)") && !noiopad) {
+			run("opt -full");
+			run("iopadmap -bits "
+				"-inpad $__FABULOUS_IBUF OUT:PAD "
+				"-outpad $__FABULOUS_OBUF IN:PAD "
+				"-toutpad $__FABULOUS_TBUF EN:IN:PAD "
+				"-tinoutpad $__FABULOUS_IOBUF EN:OUT:IN:PAD");
 		}
 
 
 		if (check_label("map_ffs")) {
-			if (complexdff) {
-				run("dfflegalize -cell $_DFF_P_ 0 -cell $_SDFF_PP?_ 0 -cell $_SDFFCE_PP?P_ 0 -cell $_DLATCH_?_ x", "with -complex-dff");
+			/*if (complexdff) {
+				run("dfflegalize -cell $_DFF_P_ 0 -cell $_DFFE_PP_ 0 -cell $_SDFF_PP?_ 0 -cell $_SDFFCE_PP?P_ 0 -cell $_DLATCH_?_ x", "with -complex-dff");
 			} else {
 				run("dfflegalize -cell $_DFF_P_ 0 -cell $_DLATCH_?_ x", "without -complex-dff");
 			}
 			run("techmap -map +/fabulous/latches_map.v");
-			run("techmap -map +/fabulous/ff_map.v");
+			run("techmap -map +/fabulous/ff_map.v");*/
+			
+			if (help_mode) {
+				run("dfflegalize -cell <cell_type_pattern> <init_values>...", "(for each -ff)");
+			} else if (!extra_map.empty()) {
+				std::string dff_str = "dfflegalize";
+				for (const auto& [cell, init] : extra_ffs)
+					dff_str += stringf(" -cell %s %s", cell, init);
+				run(dff_str);
+			}
+		}
+			
+		if (check_label("map_extra")) {
 			if (help_mode) {
 				run("techmap -map <extra_map.v>...", "(for each -extra-map)");
 			} else if (!extra_map.empty()) {
@@ -377,8 +371,7 @@ struct SynthPass : public ScriptPass
 		}
 
 		if (check_label("map_cells")) {
-			if (!forvpr)
-				run(stringf("techmap -D LUT_K=%d -map +/fabulous/cells_map.v", lut));
+			run(stringf("techmap -D LUT_K=%d -map +/fabulous/cells_map.v", lut));
 			run("clean");
 		}
 		if (check_label("check")) {
