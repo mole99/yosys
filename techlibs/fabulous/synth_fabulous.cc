@@ -58,6 +58,9 @@ struct SynthPass : public ScriptPass
 		log("    -ff <cell_type_pattern> <init_values>\n");
 		log("        convert FFs to cell types via dfflegalize (can be specified multiple times).\n");
 		log("\n");
+		log("    -multiplier-map <multiplier_map>\n");
+		log("        convert multiplications to multiplier primitives.\n");
+		log("\n");
 		log("    -extra-plib <primitive_library.v>\n");
 		log("        use the specified Verilog file for extra primitives (can be specified multiple\n");
 		log("        times).\n");
@@ -113,7 +116,7 @@ struct SynthPass : public ScriptPass
 		log("\n");
 	}
 
-	string top_module, json_file, blif_file, fsm_opts, memory_opts, carry_mode;
+	string top_module, json_file, blif_file, fsm_opts, memory_opts, carry_mode, multiplier_map;
 	std::vector<string> extra_plib, extra_map, extra_mlibmap;
 	std::vector<std::pair<string, string>> extra_ffs;
 
@@ -171,14 +174,18 @@ struct SynthPass : public ScriptPass
 				autotop = true;
 				continue;
 			}
-			if (args[argidx] == "-lut") {
+			if (args[argidx] == "-lut"&& argidx+1 < args.size()) {
 				lut = atoi(args[++argidx].c_str());
 				continue;
 			}
-			if (args[argidx] == "-ff") {
+			if (args[argidx] == "-ff" && argidx+2 < args.size()) {
 				string cell = args[++argidx];
 				string init = args[++argidx];
 				extra_ffs.push_back({cell, init});
+				continue;
+			}
+			if (args[argidx] == "-multiplier-map" && argidx+1 < args.size()) {
+				multiplier_map = args[++argidx];
 				continue;
 			}
 			if (args[argidx] == "-extra-plib" && argidx+1 < args.size()) {
@@ -221,7 +228,7 @@ struct SynthPass : public ScriptPass
 				complexdff = true;
 				continue;
 			}
-			if (args[argidx] == "-carry") {
+			if (args[argidx] == "-carry" && argidx+1 < args.size()) {
 				carry_mode = args[++argidx];
 				if (carry_mode != "none" && carry_mode != "ha")
 					log_cmd_error("Unsupported carry style: %s\n", carry_mode);
@@ -294,6 +301,18 @@ struct SynthPass : public ScriptPass
 				run("techmap -map +/cmp2lut.v -map +/cmp2lcu.v", " (if -lut)");
 			else if (lut)
 				run(stringf("techmap -map +/cmp2lut.v -map +/cmp2lcu.v -D LUT_WIDTH=%d", lut));
+			if (help_mode || multiplier_map != "") {
+				run("wreduce t:$mul");
+				run(stringf("techmap -map +/mul2dsp.v -map %s -D DSP_A_MAXWIDTH=8 -D DSP_B_MAXWIDTH=8 "
+						"-D DSP_A_MINWIDTH=2 -D DSP_B_MINWIDTH=2 -D DSP_Y_MINWIDTH=6 "
+						"-D DSP_NAME=$__FABULOUS_MUL", help_mode ? "<multiplier_map>" : multiplier_map.c_str()), "(if -multiplier-map)");
+				run("select a:mul2dsp", "              (if -multiplier-map)");
+				run("setattr -unset mul2dsp", "        (if -multiplier-map)");
+				run("opt_expr -fine", "                (if -multiplier-map)");
+				run("wreduce", "                       (if -multiplier-map)");
+				run("select -clear", "                 (if -multiplier-map)");
+				run("chtype -set $mul t:$__soft_mul", "(if -multiplier-map)");
+			}
 			if (!noalumacc)
 				run("alumacc", "  (unless -noalumacc)");
 			if (!noshare)
